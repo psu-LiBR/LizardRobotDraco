@@ -1,4 +1,4 @@
-set(srcs "main.c" "gamepad.c" "crsf.c" "crc.c")
+set(srcs "main.c" "gamepad.c" "crsf.c" "crc.c" "lizard.c")
 
 set(requires "bluepad32" "btstack")
 

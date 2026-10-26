@@ -27,6 +27,9 @@
 // crsf
 #include "crsf.h"
 
+// lizard servo gait (runs on the same chip, own GPIOs via LEDC)
+#include "lizard.h"
+
 // uncomment for official baud rate 416666 Kbit/s
 // #define USE_CRSF_OFFICIAL_SPEC
 
@@ -42,8 +45,9 @@ struct uni_platform* get_my_platform(void);
 
 static const int RX_BUF_SIZE = 1024;
 
-#define TXD_PIN (GPIO_NUM_4)
-#define RXD_PIN (GPIO_NUM_5)
+// CRSF link to flight controller -- matches actual wiring (D4/D5)
+#define TXD_PIN (GPIO_NUM_5)
+#define RXD_PIN (GPIO_NUM_6)
 
 #define QUEUE_LENGTH 10
 #define QUEUE_ITEM_SIZE sizeof(uni_gamepad_t)
@@ -137,6 +141,9 @@ void init(void)
     uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_1, &uart_config);
     uart_set_pin(UART_NUM_1, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+
+    // --- Lizard servo PWM + gait task init (lizard.c) ---
+    lizard_init();
 }
 
 int sendData(const char* logName, const uint8_t* data, const int len)
@@ -199,7 +206,11 @@ static void tx_task(void *arg)
     static const char *TX_TASK_TAG = "TX_TASK";
     esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
     static uint8_t rc_channels_buf[CRSF_FRAME_SIZE_RC] = {0};
-    
+    static bool dpad_up_prev    = false;   // tracks D-pad edges for lizard triggers
+    static bool dpad_down_prev  = false;
+    static bool dpad_left_prev  = false;
+    static bool dpad_right_prev = false;
+
     /**
      * init channels to default values: AETR1234, AER - MID, T - MIN
      * Roll[A] - MID
@@ -267,6 +278,49 @@ static void tx_task(void *arg)
             */
             build_frame(channel, rc_channels_buf, CRSF_FRAME_SIZE_RC);
 
+            // --- D-pad drives the lizard gait (lizard.c) ---
+            // Forward walks straight; left/right walk while arcing via
+            // a body-joint turn bias (ported from the old Dynamixel
+            // "turn_amp" logic -- legs untouched, bias only applied to
+            // the body/tail joints). Gait runs continuously while held,
+            // and snaps back to center/zero the instant it's released.
+            // Bit values -- verify against uni_gamepad.h if a direction
+            // seems swapped: Bluepad32 standard is DPAD_UP=0x01,
+            // DPAD_DOWN=0x02, DPAD_RIGHT=0x04, DPAD_LEFT=0x08.
+            bool dpad_up_now    = (gamepad_data.dpad & 0x01) != 0;
+            bool dpad_down_now  = (gamepad_data.dpad & 0x02) != 0;
+            bool dpad_right_now = (gamepad_data.dpad & 0x04) != 0;
+            bool dpad_left_now  = (gamepad_data.dpad & 0x08) != 0;
+
+            // TEMP DIAGNOSTIC: prints the raw dpad byte whenever it changes,
+            // so we can confirm the real bit values for down/left/right.
+            // Remove once directions are confirmed working.
+            static uint8_t dpad_raw_prev = 0xFF;
+            if (gamepad_data.dpad != dpad_raw_prev) {
+                ESP_LOGI(TX_TASK_TAG, "RAW dpad = 0x%02X", gamepad_data.dpad);
+                dpad_raw_prev = gamepad_data.dpad;
+            }
+
+            if (dpad_up_now != dpad_up_prev) {
+                lizard_set_forward_held(dpad_up_now);
+                ESP_LOGI(TX_TASK_TAG, "%s", dpad_up_now ? "D-pad forward pressed" : "D-pad forward released");
+            }
+            if (dpad_down_now != dpad_down_prev) {
+                lizard_set_backward_held(dpad_down_now);
+                ESP_LOGI(TX_TASK_TAG, "%s", dpad_down_now ? "D-pad backward pressed" : "D-pad backward released");
+            }
+            if (dpad_left_now != dpad_left_prev) {
+                lizard_set_left_held(dpad_left_now);
+                ESP_LOGI(TX_TASK_TAG, "%s", dpad_left_now ? "D-pad left pressed" : "D-pad left released");
+            }
+            if (dpad_right_now != dpad_right_prev) {
+                lizard_set_right_held(dpad_right_now);
+                ESP_LOGI(TX_TASK_TAG, "%s", dpad_right_now ? "D-pad right pressed" : "D-pad right released");
+            }
+            dpad_up_prev    = dpad_up_now;
+            dpad_down_prev  = dpad_down_now;
+            dpad_left_prev  = dpad_left_now;
+            dpad_right_prev = dpad_right_now;
         }
         sendData(TX_TASK_TAG, rc_channels_buf, CRSF_FRAME_SIZE_RC);
         vTaskDelay(5 / portTICK_PERIOD_MS); // 5ms delay for 200HZ
