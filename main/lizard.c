@@ -8,7 +8,6 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 
-
 static const char *TAG = "lizard";
 
 // ---------------- Servo / pin map ----------------
